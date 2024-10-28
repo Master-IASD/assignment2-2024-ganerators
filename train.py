@@ -8,14 +8,15 @@ import torch.optim as optim
 
 
 from model import Generator, Discriminator
-from utils import D_train, G_train, save_models, load_model, load_discriminator_model
+from utils import D_train, G_train, save_models
+from utils import load_model, load_discriminator_model
 
 
 from datasets import NoiseDataset
 
 
 if __name__ == '__main__':
-    modes = ["train", "refine", "collab"]
+    modes = ["train", "collab"]
     parser = argparse.ArgumentParser(description='Train Normalizing Flow.')
     parser.add_argument("--epochs", type=int, default=100,
                         help="Number of epochs for training.")
@@ -70,9 +71,7 @@ if __name__ == '__main__':
 
         # define optimizers
         G_optimizer = optim.Adam(G.parameters(), lr = args.lr)
-        # G_scheduler = optim.lr_scheduler.MultiStepLR(G_optimizer, milestones=[args.epochs // 2, 3 * args.epochs // 4, 7 * args.epochs // 8], gamma=0.1)
         D_optimizer = optim.Adam(D.parameters(), lr = args.lr)
-        # D_scheduler = optim.lr_scheduler.MultiStepLR(D_optimizer, milestones=[args.epochs // 2, 3 * args.epochs // 4, 7 * args.epochs // 8], gamma=0.1)
 
         print('Start Training :')
         
@@ -82,63 +81,30 @@ if __name__ == '__main__':
                 x = x.view(-1, mnist_dim)
                 D_train(x, G, D, D_optimizer, criterion)
                 G_train(x, G, D, G_optimizer, criterion)
-            # G_scheduler.step()
-            # D_scheduler.step()
 
             if epoch % 10 == 0:
                 save_models(G, D, 'checkpoints')
                     
         print('Training done')
-
-    # elif args.mode == 'refine':
-
-    #     print("Running in mode REFINE")
-
-    #     G = Generator(g_output_dim = mnist_dim).cuda()
-    #     G = load_model(G, 'checkpoints')
-    #     G = torch.nn.DataParallel(G).cuda()
-
-    #     D = Discriminator(mnist_dim).cuda()
-    #     D = load_discriminator_model(D, 'checkpoints')
-    #     D = torch.nn.DataParallel(D).cuda()
-
-    #     noise = NoiseDataset(dim=100)
-    #     rollout_rate = 0.1
-    #     rollout_steps = 30
-
-    #     noise_batch = noise.next_batch(args.batch_size).cuda()
-    #     print(noise_batch.shape)
-    #     fake_batch = G(noise_batch)
-
-    #     delta_refine = torch.zeros([args.batch_size, mnist_dim], requires_grad=True, device="cuda")
-    #     optim_r = optim.Adam([delta_refine], lr=rollout_rate)
-    #     label = torch.full((args.batch_size,1), 1, dtype=torch.float, device="cuda")
-    #     for k in range(rollout_steps):
-    #         optim_r.zero_grad()
-    #         output = D(fake_batch.detach() + delta_refine)
-    #         loss_r = criterion(output, label)
-    #         loss_r.backward()
-    #         optim_r.step()
-
-    #     os.makedirs('checkpoints-refined', exist_ok=True)
-    #     save_models(G, D, 'checkpoints-refined')
-
     
     elif args.mode == "collab":
 
-        print("Running in mode REFINE")
+        print("Running in mode COLLAB")
 
+        # load generator
         G = Generator(g_output_dim = mnist_dim).cuda()
         G = load_model(G, 'checkpoints')
         G = torch.nn.DataParallel(G).cuda()
 
+        # load discriminator
         D = Discriminator(mnist_dim).cuda()
         D = load_discriminator_model(D, 'checkpoints')
         D = torch.nn.DataParallel(D).cuda()
 
+        # create random dataset
         noise = NoiseDataset(dim=100)
-        rollout_rate = 0.1
-        rollout_steps = 50
+        rollout_rate = 0.1 # This is the learning rate used by the optimizer (optim_r) for refining the perturbations (delta_refine).
+        rollout_steps = 50 # number of iterations over which the refinement (adjustment of the generated samples) takes place.
 
         optim_d = optim.SGD(D.parameters(), lr=args.lr)
 
@@ -146,32 +112,41 @@ if __name__ == '__main__':
         for epoch in trange(1, n_epoch+1, leave=True):   
             print(f"EPOCH {epoch}")        
             for batch_idx, (x, _) in enumerate(train_loader):
+                # print batch id
                 if batch_idx % 100 == 0:
                     print(f"BATCH {batch_idx}")
+
+                # resize x from (batch size, 28, 28) to (batch size, 784)
                 x = x.view(-1, mnist_dim)
 
-                # synthesize refined samples
+                # synthesize noisy samples
                 noise_batch = noise.next_batch(args.batch_size).cuda()
                 fake_batch = G(noise_batch)
 
                 # probabilistic refinement
                 proba_refine = torch.zeros([args.batch_size, mnist_dim], requires_grad=False, device="cuda")
                 proba_steps = torch.LongTensor(args.batch_size,1).random_() % rollout_steps
+                # Create a one-hot encoded matrix indicating in which iteration each batch item will be assigned some perturbation.
                 proba_steps_one_hot = torch.LongTensor(args.batch_size, rollout_steps)
                 proba_steps_one_hot.zero_()
                 proba_steps_one_hot.scatter_(1, proba_steps, 1)
 
+                # create tensor of small perturbations
                 delta_refine = torch.zeros([args.batch_size, mnist_dim], requires_grad=True, device="cuda")
                 optim_r = optim.Adam([delta_refine], lr=rollout_rate)
+
+                # Define a target label tensor filled with ones, indicating the desired outcome for the discriminator.
                 label = torch.full((args.batch_size,1), 1, dtype=torch.float, device="cuda")
+
+                # Refinement loop to iteratively adjust `delta_refine` over a set number of steps.
                 for k in range(rollout_steps):
                     optim_r.zero_grad()
-                    output = D(fake_batch.detach() + delta_refine)
+                    output = D(fake_batch.detach() + delta_refine) # add perturbations to fake samples
                     loss_r = criterion(output, label)
-                    loss_r.backward()
+                    loss_r.backward() # improve the discriminator
                     optim_r.step()
 
-                    # probabilistic assignment
+                    # probabilistic assignment: apply the refined perturbation only at the designated step
                     proba_refine[proba_steps_one_hot[:,k] == 1, :] = delta_refine[proba_steps_one_hot[:,k] == 1, :]
 
                 ############################
@@ -195,6 +170,6 @@ if __name__ == '__main__':
                 optim_d.step()
 
             if epoch % 10 == 0:
-                save_models(G, D, 'checkpoints-refined')
+                save_models(G, D, 'checkpoints')
 
         print('Refinement done')
