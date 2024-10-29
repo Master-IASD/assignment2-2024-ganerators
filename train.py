@@ -6,6 +6,7 @@ from torchvision import datasets, transforms
 import torch.nn as nn
 import torch.optim as optim
 
+from opacus import PrivacyEngine
 
 from model import Generator, Discriminator
 from utils import D_train, G_train, save_models
@@ -16,7 +17,7 @@ from datasets import NoiseDataset
 
 
 if __name__ == '__main__':
-    modes = ["train", "collab"]
+    modes = ["train", "collab", "diff_privacy"]
     parser = argparse.ArgumentParser(description='Train Normalizing Flow.')
     parser.add_argument("--epochs", type=int, default=100,
                         help="Number of epochs for training.")
@@ -173,3 +174,87 @@ if __name__ == '__main__':
                 save_models(G, D, 'checkpoints')
 
         print('Refinement done')
+
+    elif args.mode == 'diff_privacy':
+
+        # configurations
+        epochs = args.epochs
+        lr = args.lr
+        batch_size = args.batch_size
+
+        d_steps_values = [10]
+
+        for d_steps in d_steps_values:
+
+            # initialization of models
+            G = Generator(g_output_dim=mnist_dim).cuda()
+            D = Discriminator(d_input_dim=mnist_dim).cuda()
+
+            # optimizers
+            G_optimizer = optim.Adam(G.parameters(), lr=lr)
+            D_optimizer = optim.Adam(D.parameters(), lr=lr)
+
+            # privacy engine setup for the Discriminator only
+            privacy_engine = PrivacyEngine()
+            D, D_optimizer, private_train_loader = privacy_engine.make_private(
+                module=D,
+                optimizer=D_optimizer,
+                data_loader=train_loader,
+                noise_multiplier=1.0,
+                max_grad_norm=1.0
+            )
+
+            # loss function
+            criterion = nn.BCELoss()
+            
+            # training loop
+            for epoch in range(epochs):
+                G.train()
+                D.train()
+                print(f"Epoch: {epoch + 1}/{epochs}")
+
+                # train Discriminator with Differential Privacy
+                for batch_idx, (real_data, _) in enumerate(private_train_loader):
+                    real_data = real_data.view(-1, mnist_dim).cuda()
+                    batch_size = real_data.size(0)
+
+                    # label setup
+                    real_labels = torch.ones(batch_size, 1).cuda()
+                    fake_labels = torch.zeros(batch_size, 1).cuda()
+
+                    # generate Fake Data
+                    noise = torch.randn(batch_size, 100).cuda()
+                    fake_data = G(noise)
+
+                    # Discriminator Training Steps
+                    for _ in range(d_steps):
+
+                        # train Discriminator
+                        D_optimizer.zero_grad()
+                        D.zero_grad()
+                        real_output = D(real_data)
+                        fake_output = D(fake_data.detach())
+
+                        real_loss = criterion(real_output, real_labels)
+                        fake_loss = criterion(fake_output, fake_labels)
+                        D_loss = real_loss + fake_loss
+                        D_loss.backward()
+                        D_optimizer.step()
+
+                # train Generator
+                G.zero_grad()
+                D.disable_hooks()
+
+                # generate fake data
+                noise = torch.randn(batch_size, 100).cuda()
+                fake_data = G(noise)
+
+                # generator loss
+                fake_output = D(fake_data)
+                G_loss = criterion(fake_output, real_labels)
+                G_loss.backward()
+                G_optimizer.step()
+                D.enable_hooks()
+
+                if epoch % 10 == 0:
+                    save_models(G, D, 'checkpoints')

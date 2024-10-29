@@ -1,7 +1,8 @@
 from sklearn.metrics import precision_score, recall_score
 import torch
-from model import Discriminator
-from utils import load_discriminator_model
+from model import Discriminator, Generator
+from utils import load_discriminator_model, load_model
+from torchmetrics.image.fid import FrechetInceptionDistance
 import argparse
 import numpy as np
 from scipy.linalg import sqrtm
@@ -97,6 +98,28 @@ def calculate_fid(real_images, fake_images):
     fid = diff.dot(diff) + np.trace(sigma_real + sigma_fake - 2 * covmean)
     return fid
 
+def fid_calc_fun(test_loader, G):
+    
+    fid = FrechetInceptionDistance(feature=64).cuda()
+    fid.reset()
+    G.eval()
+
+    for real_data, _ in test_loader:
+        real_data = real_data.view(-1, mnist_dim).cuda()
+        noise = torch.randn(real_data.size(0), 100).cuda()
+        fake_data = G(noise)
+                
+        real_data_rgb = real_data.view(-1, 1, 28, 28).repeat(1, 3, 1, 1)
+        fake_data_rgb = fake_data.view(-1, 1, 28, 28).repeat(1, 3, 1, 1)
+
+        real_data_rgb_uint8 = ((real_data_rgb + 1) * 127.5).clamp(0, 255).to(torch.uint8)
+        fake_data_uint8 = ((fake_data_rgb + 1) * 127.5).clamp(0, 255).to(torch.uint8)
+
+        fid.update(real_data_rgb_uint8, real=True)
+        fid.update(fake_data_uint8, real=False)
+
+    return fid.compute().item()
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate Normalizing Flow.')
     parser.add_argument("--batch_size", type=int, default=2048,
@@ -151,4 +174,7 @@ if __name__ == '__main__':
     average_recall = np.mean(recall_scores)
     average_fid = np.mean(fid_scores)
 
-    print(f'Precision: {average_precision}, Recall: {average_recall}, FID: {average_fid}')
+    G = load_model(Generator(g_output_dim=mnist_dim).cuda(), args.checkpoint)
+    fid = fid_calc_fun(test_loader, G)
+
+    print(f'Precision: {average_precision}, Recall: {average_recall}, FID: {fid}')
