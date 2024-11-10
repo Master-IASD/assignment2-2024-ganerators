@@ -1,6 +1,6 @@
 import torch 
 import os
-from tqdm import trange
+from tqdm import trange, tqdm
 import argparse
 from torchvision import datasets, transforms
 import torch.nn as nn
@@ -109,69 +109,62 @@ if __name__ == '__main__':
 
         optim_d = optim.SGD(D.parameters(), lr=args.lr)
 
-        n_epoch = args.epochs
-        for epoch in trange(1, n_epoch+1, leave=True):   
-            print(f"EPOCH {epoch}")        
-            for batch_idx, (x, _) in enumerate(train_loader):
-                # print batch id
-                if batch_idx % 100 == 0:
-                    print(f"BATCH {batch_idx}")
+        for batch_idx, (x, _) in tqdm(enumerate(train_loader)):
 
-                # resize x from (batch size, 28, 28) to (batch size, 784)
-                x = x.view(-1, mnist_dim)
+            # resize x from (batch size, 28, 28) to (batch size, 784)
+            x = x.view(-1, mnist_dim)
 
-                # synthesize noisy samples
-                noise_batch = noise.next_batch(args.batch_size).cuda()
-                fake_batch = G(noise_batch)
+            # synthesize noisy samples
+            noise_batch = noise.next_batch(args.batch_size).cuda()
+            fake_batch = G(noise_batch)
 
-                # probabilistic refinement
-                proba_refine = torch.zeros([args.batch_size, mnist_dim], requires_grad=False, device="cuda")
-                proba_steps = torch.LongTensor(args.batch_size,1).random_() % rollout_steps
-                # Create a one-hot encoded matrix indicating in which iteration each batch item will be assigned some perturbation.
-                proba_steps_one_hot = torch.LongTensor(args.batch_size, rollout_steps)
-                proba_steps_one_hot.zero_()
-                proba_steps_one_hot.scatter_(1, proba_steps, 1)
+            # probabilistic refinement
+            proba_refine = torch.zeros([args.batch_size, mnist_dim], requires_grad=False, device="cuda")
+            proba_steps = torch.LongTensor(args.batch_size,1).random_() % rollout_steps
+            # Create a one-hot encoded matrix indicating in which iteration each batch item will be assigned some perturbation.
+            proba_steps_one_hot = torch.LongTensor(args.batch_size, rollout_steps)
+            proba_steps_one_hot.zero_()
+            proba_steps_one_hot.scatter_(1, proba_steps, 1)
 
-                # create tensor of small perturbations
-                delta_refine = torch.zeros([args.batch_size, mnist_dim], requires_grad=True, device="cuda")
-                optim_r = optim.Adam([delta_refine], lr=rollout_rate)
+            # create tensor of small perturbations
+            delta_refine = torch.zeros([args.batch_size, mnist_dim], requires_grad=True, device="cuda")
+            optim_r = optim.Adam([delta_refine], lr=rollout_rate)
 
-                # Define a target label tensor filled with ones, indicating the desired outcome for the discriminator.
-                label = torch.full((args.batch_size,1), 1, dtype=torch.float, device="cuda")
+            # Define a target label tensor filled with ones, indicating the desired outcome for the discriminator.
+            label = torch.full((args.batch_size,1), 1, dtype=torch.float, device="cuda")
 
-                # Refinement loop to iteratively adjust `delta_refine` over a set number of steps.
-                for k in range(rollout_steps):
-                    optim_r.zero_grad()
-                    output = D(fake_batch.detach() + delta_refine) # add perturbations to fake samples
-                    loss_r = criterion(output, label)
-                    loss_r.backward() # improve the discriminator
-                    optim_r.step()
+            # Refinement loop to iteratively adjust `delta_refine` over a set number of steps.
+            for k in range(rollout_steps):
+                optim_r.zero_grad()
+                output = D(fake_batch.detach() + delta_refine) # add perturbations to fake samples
+                loss_r = criterion(output, label)
+                loss_r.backward() # improve the discriminator
+                optim_r.step()
 
-                    # probabilistic assignment: apply the refined perturbation only at the designated step
-                    proba_refine[proba_steps_one_hot[:,k] == 1, :] = delta_refine[proba_steps_one_hot[:,k] == 1, :]
+                # probabilistic assignment: apply the refined perturbation only at the designated step
+                proba_refine[proba_steps_one_hot[:,k] == 1, :] = delta_refine[proba_steps_one_hot[:,k] == 1, :]
 
-                ############################
-                # Shape D network: maximize log(D(x)) + log(1 - D(R(G(z))))
-                ###########################
-                optim_d.zero_grad()
+            ############################
+            # Shape D network: maximize log(D(x)) + log(1 - D(R(G(z))))
+            ###########################
+            optim_d.zero_grad()
 
-                # train with real
-                real_batch = x
-                output = D(real_batch)
-                loss_d_real = criterion(output, label)
-                loss_d_real.backward()
+            # train with real
+            real_batch = x
+            output = D(real_batch)
+            loss_d_real = criterion(output, label)
+            loss_d_real.backward()
 
-                # train with refined
-                label.fill_(0)
-                output = D((fake_batch+proba_refine).detach())
-                loss_d_fake = criterion(output, label)
-                loss_d_fake.backward()
+            # train with refined
+            label.fill_(0)
+            output = D((fake_batch+proba_refine).detach())
+            loss_d_fake = criterion(output, label)
+            loss_d_fake.backward()
 
-                loss_d = loss_d_real + loss_d_fake
-                optim_d.step()
+            loss_d = loss_d_real + loss_d_fake
+            optim_d.step()
 
-            if epoch % 10 == 0:
-                save_models(G, D, 'checkpoints')
+        save_models(G, D, 'checkpoints')
 
         print('Refinement done')
 
