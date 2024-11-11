@@ -1,4 +1,4 @@
-import torch 
+import torch
 import os
 from tqdm import trange, tqdm
 import argparse
@@ -108,6 +108,7 @@ if __name__ == '__main__':
         rollout_steps = 50 # number of iterations over which the refinement (adjustment of the generated samples) takes place.
 
         optim_d = optim.SGD(D.parameters(), lr=args.lr)
+        optim_g = optim.SGD(G.parameters(), lr=args.lr)
 
         for batch_idx, (x, _) in tqdm(enumerate(train_loader)):
 
@@ -163,6 +164,18 @@ if __name__ == '__main__':
 
             loss_d = loss_d_real + loss_d_fake
             optim_d.step()
+
+            ############################
+            # Update G network: maximize log(D(G(z)))
+            ###########################
+            G.zero_grad()
+
+            label.fill_(1)  # fake labels are real for generator cost
+            output = D(fake_batch)
+            loss_g = criterion(output, label)
+            loss_g.backward()
+
+            optim_g.step()
 
         save_models(G, D, 'checkpoints')
 
