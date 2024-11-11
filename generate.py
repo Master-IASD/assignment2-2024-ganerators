@@ -22,12 +22,12 @@ def generate_interpolated_samples_old(G, num_samples=10000, interpolation_steps=
             
     return torch.stack(generated_images)
 
-def generate_interpolated_samples(G, latent_dim, num_samples=10000, interpolation_steps=10):
+def generate_interpolated_samples(G, num_samples=10000, interpolation_steps=10):
     generated_images = []
     
     for _ in range(num_samples // interpolation_steps):
         # Generate 10 random vectors in the latent space
-        z_vectors = [torch.randn(1, latent_dim).cuda() for _ in range(10)]
+        z_vectors = [torch.randn(1, 100).cuda() for _ in range(10)]
         
         for _ in range(interpolation_steps):
             # Generate random weights that sum to 1 for the convex combination
